@@ -58,10 +58,15 @@ func config() (*setup.Setup, *setup.Inlet, *setup.Outlet) {
 }
 
 // compile builds the setup-wide program, failing the test on
-// any compile error.
-func compile(t *testing.T, cfg *setup.Setup) *snippets.Program {
+// any compile error. The secrets, when given, join the build
+// as the opened dict.
+func compile(t *testing.T, cfg *setup.Setup, secrets ...map[string]string) *snippets.Program {
 	t.Helper()
-	program, err := snippets.Compile(cfg)
+	var opened map[string]string
+	if len(secrets) > 0 {
+		opened = secrets[0]
+	}
+	program, err := snippets.Compile(cfg, opened)
 	if err != nil {
 		t.Fatalf("cannot compile: %v", err)
 	}
@@ -72,7 +77,7 @@ func TestCompileNoSnippets(t *testing.T) {
 	// A setup with no snippets compiles to a nil program, and
 	// a flow on it starts without error.
 	cfg, inlet, _ := config()
-	program, err := snippets.Compile(cfg)
+	program, err := snippets.Compile(cfg, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -118,7 +123,7 @@ func TestBadNamesRefused(t *testing.T) {
 		} else {
 			cfg.Outlets = append(cfg.Outlets, &setup.Outlet{Name: tc.name})
 		}
-		_, err := snippets.Compile(cfg)
+		_, err := snippets.Compile(cfg, nil)
 		want := tc.kind + " invalid name " + strconv.Quote(tc.name) + ": must match ^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
 		if err == nil || err.Error() != want {
 			t.Errorf("%s %q: error = %v, want %q", tc.kind, tc.name, err, want)
@@ -171,7 +176,7 @@ func TestOpeningFlowRunsPerKind(t *testing.T) {
 	outlet.OpeningFlow = reindent(`
 		|print(flow.state["mark"])
 	`)
-	program, err := snippets.Compile(cfg)
+	program, err := snippets.Compile(cfg, nil)
 	if err != nil {
 		t.Fatalf("cannot compile: %v", err)
 	}
@@ -209,7 +214,7 @@ func TestSameNameInletAndOutlet(t *testing.T) {
 			`),
 		}},
 	}
-	program, err := snippets.Compile(cfg)
+	program, err := snippets.Compile(cfg, nil)
 	if err != nil {
 		t.Fatalf("cannot compile: %v", err)
 	}
@@ -265,7 +270,7 @@ func TestCompileErrorNamesSnippet(t *testing.T) {
 	inlet.OutgoingHeaders = reindent(`
 		|def(:=
 	`)
-	_, err := snippets.Compile(cfg)
+	_, err := snippets.Compile(cfg, nil)
 	if err == nil || !strings.Contains(err.Error(), "inlets.local.outgoing-headers:1:5:") {
 		t.Fatalf("error = %v, want the snippet path and a position", err)
 	}
@@ -1026,5 +1031,45 @@ func TestLogRejectsBadArguments(t *testing.T) {
 				t.Fatalf("error = %v, want it to contain %q", err, tc.want)
 			}
 		})
+	}
+}
+
+func TestSecretsDict(t *testing.T) {
+	// The opened secrets join the build as one frozen dict: a
+	// snippet reads its values, and a mutation fails - no
+	// snippet hands a secret to another flow by writing to it.
+	cfg, inlet, _ := config()
+	inlet.OpeningFlow = reindent(`
+		|log({"tok": secrets["remote"]})
+	`)
+	program := compile(t, cfg, map[string]string{"remote": "tok-open"})
+	entry := logging.Begin("GET", "/", "")
+	if _, err := program.OpeningFlow(nil, inlet, entry); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entry.Logs) != 1 || entry.Logs[0]["tok"] != "tok-open" {
+		t.Errorf("log object = %v, want the opened value", entry.Logs)
+	}
+
+	cfg, inlet, _ = config()
+	inlet.OpeningFlow = reindent(`
+		|secrets["added"] = "write"
+	`)
+	program = compile(t, cfg, map[string]string{"remote": "tok-open"})
+	if _, err := program.OpeningFlow(nil, inlet, nil); err == nil || !strings.Contains(err.Error(), "frozen") {
+		t.Errorf("error = %v, want the frozen failure", err)
+	}
+}
+
+func TestSecretsUnboundWithoutAny(t *testing.T) {
+	// With no secrets open, nothing binds: a snippet naming the
+	// dict fails to compile, the name right there.
+	cfg, inlet, _ := config()
+	inlet.OpeningFlow = reindent(`
+	|print(secrets["remote"])
+	`)
+	_, err := snippets.Compile(cfg, nil)
+	if err == nil || !strings.Contains(err.Error(), "undefined: secrets") {
+		t.Errorf("error = %v, want the unbound name", err)
 	}
 }

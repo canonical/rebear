@@ -17,6 +17,7 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"io"
@@ -24,12 +25,14 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/canonical/rebear/internal/logging"
 	"github.com/canonical/rebear/internal/notes"
 	"github.com/canonical/rebear/internal/proxy"
+	"github.com/canonical/rebear/internal/secrets"
 	"github.com/canonical/rebear/internal/setup"
 	"github.com/canonical/rebear/internal/tls"
 )
@@ -41,6 +44,10 @@ type RunOptions struct {
 	// Stdout receives regular output; Stderr receives errors and help.
 	Stdout io.Writer
 	Stderr io.Writer
+	// Stdin carries the asks: the password at startup when the
+	// secrets directory holds anything, the password and the
+	// secret under --add-secret. Nil means os.Stdin.
+	Stdin io.Reader
 	// SetupPath selects the configuration file; empty means
 	// $REBEAR_HOME/rebear.cnf, then $XDG_CONFIG_HOME/rebear/rebear.cnf.
 	SetupPath string
@@ -54,6 +61,9 @@ type RunOptions struct {
 // errors.
 func Run(ctx context.Context, opts RunOptions) error {
 	logging.SetWriter(opts.Stdout)
+	if opts.Stdin == nil {
+		opts.Stdin = os.Stdin
+	}
 
 	parsed, err := Parse(opts.Argv)
 	if err != nil {
@@ -81,8 +91,8 @@ func Run(ctx context.Context, opts RunOptions) error {
 	}
 	// The snapshots land beside the config, the same resolution
 	// the config itself uses: $REBEAR_HOME/snapshots, else the
-	// user config dir's rebear/snapshots. The notes and the tls
-	// directory land the same way, under notes and tls.
+	// user config dir's rebear/snapshots. The notes, the tls
+	// directory, and the secrets directory land the same way.
 	var baseDir string
 	if home := os.Getenv("REBEAR_HOME"); home != "" {
 		baseDir = home
@@ -92,6 +102,7 @@ func Run(ctx context.Context, opts RunOptions) error {
 	snapshotsDir := filepath.Join(baseDir, "snapshots")
 	notesDir := filepath.Join(baseDir, "notes")
 	tlsDir := filepath.Join(baseDir, "tls")
+	secretsDir := filepath.Join(baseDir, "secrets")
 
 	// The one-shot pair generation: the names come off the
 	// command line, the pairs land in the tls directory, and
@@ -105,9 +116,23 @@ func Run(ctx context.Context, opts RunOptions) error {
 			if _, err := store.Generate(name, name); err != nil {
 				return err
 			}
-			fmt.Fprintf(opts.Stdout, "tls: generated $REBEAR_HOME/tls/%s.{cert,key}\n", name)
+			fmt.Fprintf(opts.Stdout, "tls: generated %s.{cert,key}\n", shortPath(filepath.Join(tlsDir, name)))
 		}
 		return nil
+	}
+
+	// The one-shot seal: the name comes off the command line,
+	// the salt is picked, the password and the secret are read,
+	// and the process leaves without serving anything.
+	if parsed.AddSecret != "" {
+		return sealSecret(opts, parsed, baseDir)
+	}
+
+	// The one-shot keyring store: the password is asked for,
+	// checked, and stored in the keyring, and the process
+	// leaves without serving anything.
+	if parsed.SetKeyring {
+		return setKeyring(opts, baseDir)
 	}
 
 	sigs := make(chan os.Signal, 1)
@@ -136,13 +161,44 @@ func Run(ctx context.Context, opts RunOptions) error {
 		}
 	}()
 
+	// The password lives for the process: the first ask fills it
+	// in, every generation reuses it.
+	var password string
+	asked := false
+
 	// Each pass serves one generation; a SIGHUP starts the next.
 	var listeners map[string]net.Listener
 	for {
 		var p *proxy.Proxy
 		var buildErr error
+		// The secrets scan and open ride every generation, so a
+		// file added or resealed lands at the next SIGHUP, under
+		// the password the first ask read.
+		var opened map[string]string
+		sealed, err := secrets.Scan(secretsDir)
+		if err != nil {
+			buildErr = err
+		} else if len(sealed) > 0 {
+			if !asked {
+				ask := newRunAsker(opts, parsed.Keyring, baseDir)
+				password, err = ask.readPassword("secrets password")
+				if err != nil {
+					return err
+				}
+				asked = true
+			}
+			if opened, err = secrets.Open(sealed, password); err != nil {
+				buildErr = err
+			}
+		}
 		cfg, err := setup.Load(setupPath)
-		if err == nil {
+		if err != nil {
+			cfg = nil
+			if buildErr == nil {
+				buildErr = fmt.Errorf("%s: %v", setupPath, err)
+			}
+		}
+		if buildErr == nil {
 			p, buildErr = proxy.New(&proxy.ProxyOptions{
 				Setup:         cfg,
 				LogAt:         parsed.LogAt,
@@ -150,9 +206,8 @@ func Run(ctx context.Context, opts RunOptions) error {
 				SnapshotsPath: snapshotsDir,
 				Notes:         notesStore,
 				TLSPath:       tlsDir,
+				Secrets:       opened,
 			})
-		} else {
-			buildErr = fmt.Errorf("%s: %v", setupPath, err)
 		}
 		if buildErr != nil {
 			if listeners == nil {
@@ -196,4 +251,155 @@ func Run(ctx context.Context, opts RunOptions) error {
 			}
 		}
 	}
+}
+
+// newRunAsker builds the one asker of the run. --keyring
+// points the password asks at the keyring entry the home
+// names; without it, every ask reads stdin.
+func newRunAsker(opts RunOptions, keyring bool, home string) *asker {
+	keyringHome := ""
+	if keyring {
+		keyringHome = home
+	}
+	return newAsker(opts.Stdin, opts.Stderr, keyringHome)
+}
+
+// sealSecret is the --add-secret one-shot: the name is checked,
+// the salt is picked, the password and the secret are read, and
+// the file is written and confirmed. Overwriting an existing
+// name is the rotation path, not an error.
+func sealSecret(opts RunOptions, parsed *Options, baseDir string) error {
+	if err := setup.CheckName(parsed.AddSecret); err != nil {
+		return fmt.Errorf("--add-secret: %v", err)
+	}
+	dir := filepath.Join(baseDir, "secrets")
+	salt, borrowed, err := pickSalt(parsed.Salt, dir)
+	if err != nil {
+		return err
+	}
+	ask := newRunAsker(opts, parsed.Keyring, baseDir)
+	password, err := ask.readPassword("password")
+	if err != nil {
+		return err
+	}
+	if len(borrowed) > 0 {
+		// The borrowed salt shares the directory's derivation,
+		// so the password must open the secrets it came from -
+		// and opening them replaces the second ask.
+		if _, err := secrets.Open(borrowed, password); err != nil {
+			return fmt.Errorf("wrong password: %v", err)
+		}
+	} else {
+		// Nothing on disk can check this password - the first
+		// seal of a new directory, or a --salt one.
+		if err := ask.confirmTyped(password); err != nil {
+			return err
+		}
+	}
+	secret, err := ask.readLine("secret: ")
+	if err != nil {
+		return fmt.Errorf("cannot read the secret: %v", err)
+	}
+	body, err := secrets.Encrypt(secret, password, salt)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(dir, parsed.AddSecret+".json")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.Stdout, "secrets: wrote %s\n", shortPath(path))
+	return nil
+}
+
+// setKeyring is the --set-keyring one-shot: the password is
+// asked for on stdin and stored in the keyring entry the home
+// names. The seals on disk check it first - one ask, the check
+// in place of a second - and a password that opens nothing is
+// refused; with no seals, a typed password is asked twice. An
+// empty password is refused too: a later lookup cannot tell
+// an empty entry from a missing one.
+func setKeyring(opts RunOptions, home string) error {
+	dir := filepath.Join(home, "secrets")
+	sealed, err := secrets.Scan(dir)
+	if err != nil {
+		return err
+	}
+	ask := newAsker(opts.Stdin, opts.Stderr, "")
+	password, err := ask.readPassword("password")
+	if err != nil {
+		return err
+	}
+	if password == "" {
+		return fmt.Errorf("--set-keyring: cannot store an empty password")
+	}
+	if len(sealed) > 0 {
+		// Whatever opens the seals on disk can start rebear, so
+		// the stored entry agrees with every file.
+		if _, err := secrets.Open(sealed, password); err != nil {
+			return fmt.Errorf("wrong password: %v", err)
+		}
+	} else {
+		// Nothing on disk can check the password, so the fingers do.
+		if err := ask.confirmTyped(password); err != nil {
+			return err
+		}
+	}
+	if err := storeKeyringPassword(home, password); err != nil {
+		return err
+	}
+	fmt.Fprintf(opts.Stdout, "keyring: stored the password for %s\n", shortPath(home))
+	return nil
+}
+
+// pickSalt picks the seal's salt, reporting the secrets the
+// salt was borrowed from: the flag's own base64, the
+// directory's first secret's - in name order, the size every
+// file carries - or a fresh draw on an empty directory. The
+// flag and the draw borrow from nothing; a broken file fails
+// the scan, naming the offender.
+func pickSalt(flagged, dir string) ([]byte, []secrets.Secret, error) {
+	if flagged != "" {
+		salt, err := secrets.Salt(flagged)
+		if err != nil {
+			return nil, nil, fmt.Errorf("--salt: %v", err)
+		}
+		return salt, nil, nil
+	}
+	sealed, err := secrets.Scan(dir)
+	if err != nil {
+		return nil, nil, err
+	}
+	if len(sealed) > 0 {
+		return sealed[0].Salt, sealed, nil
+	}
+	salt := make([]byte, 24)
+	if _, err := rand.Read(salt); err != nil {
+		return nil, nil, err
+	}
+	return salt, nil, nil
+}
+
+// shortPath names the file's real path, the user's home
+// shortened to ~ when the path falls under it: the
+// confirmation spells the file without the whole home tree.
+func shortPath(path string) string {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return path
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return abs
+	}
+	if abs == home {
+		return "~"
+	}
+	if rest, ok := strings.CutPrefix(abs, home+string(filepath.Separator)); ok {
+		return "~/" + rest
+	}
+	return abs
 }

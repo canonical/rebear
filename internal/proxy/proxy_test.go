@@ -1705,6 +1705,50 @@ func TestProxyOutgoingHeadersFiltered(t *testing.T) {
 	}
 }
 
+func TestProxySecretRidesHeader(t *testing.T) {
+	// A secret handed over open rides the request: the snippet
+	// reads it out of the frozen dict and the header reaches
+	// the upstream.
+	upstream, upURL := startUpstream(t, harness.Response{Status: 200, Body: "ok"})
+	addr := freePort(t)
+	cnf := reindent(`
+		|inlets.local:
+		|    address: "` + addr + `"
+		|    outlet: "remote"
+		|outlets.remote:
+		|    address: "` + addrOf(upURL) + `"
+		|    url: "` + upURL + `"
+		|    outgoing-headers:
+		|        """
+		|        headers["Authorization"] = "Bearer " + secrets["api"]
+		|        """
+		`)
+	dir := t.TempDir()
+	cfg, err := setup.Parse([]byte(cnf), dir)
+	if err != nil {
+		t.Fatalf("cannot parse setup: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	p, err := proxy.New(&proxy.ProxyOptions{Setup: cfg, Secrets: map[string]string{"api": "tok-1"}})
+	if err != nil {
+		t.Fatalf("cannot start proxy: %v", err)
+	}
+	p.Serve(ctx)
+	t.Cleanup(func() { _ = p.Stop() })
+
+	if _, err := harness.NewClient("http://"+addr).Do("GET", "/", nil, ""); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	req := upstream.LastRequest()
+	if req == nil {
+		t.Fatalf("outlet received no request")
+	}
+	if req.Headers["Authorization"] != "Bearer tok-1" {
+		t.Errorf("Authorization = %q, want the sealed token in the header", req.Headers["Authorization"])
+	}
+}
+
 func TestProxyIncomingHeadersFiltered(t *testing.T) {
 	// Response headers pass the pair's incoming filters
 	// before writing back: deletions reach the client.

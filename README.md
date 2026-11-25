@@ -2,6 +2,8 @@
 
 Programmable proxy for local HTTP introspection and manipulation.
 
+
+
 ## Contents
 
 - [Overview](#overview)
@@ -24,13 +26,17 @@ Programmable proxy for local HTTP introspection and manipulation.
   - [flow](#flow)
   - [outgoing](#outgoing)
   - [incoming](#incoming)
+  - [secrets](#secrets)
   - [notes](#notes)
   - [headers](#headers)
   - [body](#body)
   - [event](#event)
+- [Protecting secrets](#protecting-secrets)
 - [TLS support](#tls-support)
   - [TLS on outlets](#tls-on-outlets)
   - [TLS on inlets](#tls-on-inlets)
+
+
 
 ## Overview
 
@@ -98,22 +104,42 @@ This example shows the basics, but there's much more:
 
 The following sections will detail those features.
 
+
 ## Operation
 
 The configuration lives under the `$REBEAR_HOME` path, which defaults to
 `~/.config/rebear/` if missing, respecting `$XDG_CONFIG_HOME`.
 
 ```
-Usage: rebear [--indent] [--log-at]
+Usage: rebear [options]
 
 Options:
-  --indent     Indent log records as multi-line JSON.
-  --log-at     Record snippet call positions in log objects and errors.
+  --indent                Indent log records as multi-line JSON.
+  --log-at                Record snippet position in logs and errors.
+  --add-tls <name>[,...]  Generate the named certificates.
+  --add-secret <name>     Seal the named secret under secrets/.
+  --salt <base64>         Set the seal's salt, for --add-secret.
+  --keyring               Get master password from keyring via secret-tool.
+  --set-keyring           Set master password in keyring via secret-tool.
 ```
+
 
 ## Examples
 
 ### Protect a bearer token from a sandbox
+
+The sandbox client only knows its own throw-away key, while the real
+service token lives in an encrypted secret file:
+
+```bash
+$ rebear --add-secret remote
+password: ***
+again: ***
+secret: ***
+secrets: wrote ~/.config/rebear/secrets/remote.json
+```
+
+In the configuration:
 
 ```python
 inlets.sandbox:
@@ -130,7 +156,7 @@ outlets.remote:
     url: "/"
     outgoing-headers:
         '''
-        headers["Authorization"] = "Bearer the-real-key"
+        headers["Authorization"] = "Bearer " + secrets["remote"]
         '''
 ```
 
@@ -292,6 +318,7 @@ outlets.auth-only:
     tls-auth: ["client"]
 ```
 
+
 ## Configuration reference
 
 The following is an annotated reference of the complete configuration which
@@ -383,6 +410,7 @@ outlets:
             '''
 ```
 
+
 ## Snippets
 
 Every snippet below may be used in an inlet, midlet, or outlet, according
@@ -434,6 +462,7 @@ direction is available, run when an event is coming towards the inlet.
 
 - Available parameters: `flow`, `outgoing`, `incoming`, `event`
 - Available on: inlets, midlets, outlets
+
 
 ## Parameters
 
@@ -505,6 +534,14 @@ Fields are set to `None` before the response arrives at the outlet.
   to be flushed through the inlet. The snapshot happens via streaming
   and does not force the buffering of the body.
 
+### secrets
+
+A read-only dict holding the secrets that were loaded from the
+encrypted `$REBEAR_HOME/secrets/` files. See the [Protecting secrets](#protecting-secrets)
+section for details on how to create and manage them.
+
+If there are no secrets at all, the `secrets` variable will not be available.
+
 ### notes
 
 The `closing-flow` snippet is the only one with access to the `notes`
@@ -567,6 +604,65 @@ updated within the `incoming-event` snippet.
 All of these fields may be used for modifying the event, and the
 `data` and `json` fields may both be used to change the event data,
 interchangeably.
+
+
+## Protecting secrets
+
+### Storing
+
+One important use case of rebear is verifying and replacing fake internal secrets
+with real ones while the request is going out towards the remote service. Rather than
+having the real secrets in plain text in the configuration file, rebear can encrypt
+them at rest with a master password.
+
+For that, start by creating a new secret:
+
+```bash
+$ rebear --add-secret remote
+password:
+again:
+secret:
+secrets: wrote ~/.config/rebear/secrets/remote.json
+```
+
+These secret files are self-contained: remove a file, and the secret is cleanly removed;
+copy the same file, and the secret is backed up or reused elsewhere. Be aware that there's
+a startup cost for every salt used, so if you plan on encrypting a secret locally for
+sending elsewhere, use the `--salt` option to replicate the remote salt, if possible.
+
+### Running
+
+With one or more secrets in place, the next time rebear starts, it will ask for the
+master password:
+
+```bash
+$ rebear
+secrets password: 
+```
+
+Type the same password, and rebear will start as usual, except now every snippet has
+access to the additional [secrets variable](#secrets):
+
+```python
+outlets.remote:
+    outgoing-headers:
+        '''
+        headers["Authorization"] = "Bearer " + secrets["remote"]
+        '''
+```
+
+Secrets also hot-reload on SIGHUP together with the rest of the configuration, but
+for a change of master password, rebear needs to be restarted.
+
+### Using the keyring
+
+To avoid typing the master password at every restart, use `--keyring` to look it up on
+the standard keyring. Before that works, initialize (or reset) the password
+via `--set-keyring`.
+
+Both flags leverage the `secret-tool` command-line tool to interact with the keyring,
+so make sure that's installed and available in your `$PATH`.
+
 
 ## TLS support
 

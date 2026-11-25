@@ -90,6 +90,11 @@ type ProxyOptions struct {
 	// setup that uses them against an empty path is a build
 	// error.
 	TLSPath string
+
+	// Secrets carries the opened secrets the snippets read as
+	// the predeclared `secrets` dict; nil or empty binds
+	// nothing - a snippet naming it fails to compile there.
+	Secrets map[string]string
 }
 
 // Proxy is a built proxy: one shared listener per distinct
@@ -120,7 +125,7 @@ type Proxy struct {
 // inherited sockets open for their owner. Log output goes to
 // the logging stream. Call Serve to start serving.
 func New(opts *ProxyOptions) (*Proxy, error) {
-	program, err := snippets.Compile(opts.Setup)
+	program, err := snippets.Compile(opts.Setup, opts.Secrets)
 	if err != nil {
 		return nil, err
 	}

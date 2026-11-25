@@ -93,6 +93,111 @@ func TestParseAddTLS(t *testing.T) {
 	}
 }
 
+func TestParseAddSecret(t *testing.T) {
+	// --add-secret takes one name, spelled apart or with =; a
+	// second one is an error.
+	opts, err := Parse([]string{"--add-secret", "api"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.AddSecret != "api" {
+		t.Errorf("AddSecret = %q, want api", opts.AddSecret)
+	}
+	opts, err = Parse([]string{"--add-secret=api"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.AddSecret != "api" {
+		t.Errorf("AddSecret = %q, want api", opts.AddSecret)
+	}
+	testCases := []struct {
+		argv []string
+		want string
+	}{{
+		argv: []string{"--add-secret"},
+		want: "needs a name",
+	}, {
+		argv: []string{"--add-secret", "api", "--add-secret", "beta"},
+		want: "accepts one name",
+	}, {
+		argv: []string{"--add-secret=api", "--add-secret=beta"},
+		want: "accepts one name",
+	}}
+	for _, tc := range testCases {
+		_, err := Parse(tc.argv)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Parse(%v): error = %v, want %q", tc.argv, err, tc.want)
+		}
+	}
+}
+
+func TestParseSalt(t *testing.T) {
+	// --salt takes one value and belongs to the add: alone it
+	// is an error.
+	opts, err := Parse([]string{"--add-secret", "api", "--salt", "AA=="})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Salt != "AA==" || opts.AddSecret != "api" {
+		t.Errorf("opts = %+v, want both values", opts)
+	}
+	_, err = Parse([]string{"--salt=AA=="})
+	if err == nil || !strings.Contains(err.Error(), "--salt needs --add-secret") {
+		t.Errorf("error = %v, want the --add-secret requirement", err)
+	}
+	_, err = Parse([]string{"--add-secret", "api", "--salt", "AA==", "--salt", "BB=="})
+	if err == nil || !strings.Contains(err.Error(), "accepts one value") {
+		t.Errorf("error = %v, want one value only", err)
+	}
+}
+
+func TestParseKeyring(t *testing.T) {
+	// --keyring reads the password from the keyring; without it
+	// the asks read stdin. --set-keyring stores the entry and
+	// exits. The two exclude each other and the other one-shot
+	// operations: one password flow per run.
+	opts, err := Parse([]string{"--keyring"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.Keyring {
+		t.Errorf("Keyring = false, want true")
+	}
+	opts, err = Parse([]string{"--set-keyring"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.SetKeyring {
+		t.Errorf("SetKeyring = false, want true")
+	}
+	opts, err = Parse(nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if opts.Keyring || opts.SetKeyring {
+		t.Errorf("opts = %+v, want the defaults", opts)
+	}
+	testCases := []struct {
+		argv []string
+		want string
+	}{{
+		argv: []string{"--keyring", "--set-keyring"},
+		want: "--set-keyring cannot be used with --keyring",
+	}, {
+		argv: []string{"--add-secret", "api", "--set-keyring"},
+		want: "--set-keyring cannot be used with --add-secret",
+	}, {
+		argv: []string{"--add-tls", "svc", "--set-keyring"},
+		want: "--set-keyring cannot be used with --add-tls",
+	}}
+	for _, tc := range testCases {
+		_, err := Parse(tc.argv)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("Parse(%v): error = %v, want %q", tc.argv, err, tc.want)
+		}
+	}
+}
+
 func TestParseHelp(t *testing.T) {
 	// -h and --help ask for the usage text rather than starting
 	// up.

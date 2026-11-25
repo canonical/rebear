@@ -29,6 +29,7 @@ import (
 func main() {
 	err := cli.Run(context.Background(), cli.RunOptions{
 		Argv:   os.Args[1:],
+		Stdin:  os.Stdin,
 		Stdout: os.Stdout,
 		Stderr: os.Stderr,
 	})

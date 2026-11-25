@@ -22,6 +22,7 @@ package snippets
 
 import (
 	"fmt"
+	"maps"
 	"slices"
 	"strings"
 
@@ -93,12 +94,15 @@ func (p *Program) SetNotes(store *notes.Store) {
 }
 
 // Compile assembles every inlet's and outlet's snippets into one
-// program. A config with no snippets returns a nil Program, whose
-// methods are no-ops. A bad inlet or outlet name fails here, where
-// names become function names. A snippet that fails to compile fails
-// here too, with its config path and the position in its own text.
+// program. The opened secrets, when any, join the build as one
+// frozen predeclared dict: a snippet reads `secrets["name"]`;
+// with none, a snippet naming it fails to compile. A config with
+// no snippets returns a nil Program, whose methods are no-ops.
+// A bad inlet or outlet name fails here, where names become
+// function names. A snippet that fails to compile fails here
+// too, with its config path and the position in its own text.
 // Print output goes to the package logger.
-func Compile(cfg *setup.Setup) (*Program, error) {
+func Compile(cfg *setup.Setup, secrets map[string]string) (*Program, error) {
 	for _, in := range cfg.Inlets {
 		if err := setup.CheckName(in.Name); err != nil {
 			return nil, fmt.Errorf("inlet %v", err)
@@ -185,6 +189,10 @@ func Compile(cfg *setup.Setup) (*Program, error) {
 	if len(p.funcs) == 0 {
 		return nil, nil
 	}
+	predeclared := builtins()
+	if len(secrets) > 0 {
+		predeclared["secrets"] = secretsDict(secrets)
+	}
 	script, err := scripts.New(&scripts.Options{
 		// Print output is the author's text: never a format string.
 		// It lands on the request's log entry as one object, the
@@ -204,7 +212,7 @@ func Compile(cfg *setup.Setup) (*Program, error) {
 			flow.entry.Log(object)
 		},
 		Funcs:    p.funcs,
-		Builtins: builtins(),
+		Builtins: predeclared,
 	})
 	if err != nil {
 		return nil, err
@@ -239,6 +247,20 @@ func bodySnippet(s setup.Sniplet, filter string, jf *setup.BodyFilter) (string, 
 		return "", fmt.Errorf("%ss.%s.%s: key bindings are not implemented yet", s.Kindlet(), s.Namelet(), filter)
 	}
 	return jf.Body, nil
+}
+
+// secretsDict spells the opened secrets as one frozen dict, the
+// predeclared `secrets` every snippet reads. Handoff carries the
+// freeze the later globals freeze gives, so no snippet hands a
+// secret to another flow by mutation. Names are inserted sorted,
+// keeping the assembly deterministic.
+func secretsDict(secrets map[string]string) starlark.Value {
+	dict := starlark.NewDict(len(secrets))
+	for _, name := range slices.Sorted(maps.Keys(secrets)) {
+		_ = dict.SetKey(starlark.String(name), starlark.String(secrets[name]))
+	}
+	dict.Freeze()
+	return dict
 }
 
 // NewFlow creates one request's flow on the inlet, nothing

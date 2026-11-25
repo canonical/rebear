@@ -2,6 +2,10 @@ module github.com/canonical/rebear
 
 go 1.25.0
 
-require go.starlark.net v0.0.0-20261021141710-4f4267fb140d
+require (
+	go.starlark.net v0.0.0-20261021141710-4f4267fb140d
+	golang.org/x/crypto v0.55.0
+	golang.org/x/term v0.45.0
+)
 
-require golang.org/x/sys v0.42.0 // indirect
+require golang.org/x/sys v0.47.0 // indirect

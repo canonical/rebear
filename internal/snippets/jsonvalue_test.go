@@ -498,7 +498,7 @@ func TestJSONKeyBindingsNotImplemented(t *testing.T) {
 	inlet.OutgoingBody = &setup.BodyFilter{
 		Keys: []setup.KeyBinding{{Path: []string{"choices"}, Snippet: "pass"}},
 	}
-	_, err := snippets.Compile(cfg)
+	_, err := snippets.Compile(cfg, nil)
 	want := "inlets.local.outgoing-body: key bindings are not implemented yet"
 	if err == nil || err.Error() != want {
 		t.Fatalf("error = %v, want %q", err, want)

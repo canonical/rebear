@@ -11,5 +11,6 @@ IMPORTANT: Read the `.kb/agents.md` file.
 - [.kb/notes.md](.kb/notes.md) - The global notes map: the lock window, the day files, the flush points.
 - [.kb/reload.md](.kb/reload.md) - The SIGHUP reload: masters and serving copies, the handover map, the build-then-retire order.
 - [.kb/scripts.md](.kb/scripts.md) - Starlark snippet runtime: assembled scripts, frozen shared globals, state as an argument.
+- [.kb/secrets.md](.kb/secrets.md) - The seal files under the secrets directory, the password ask at startup and its keyring source, the secrets dict in snippets.
 - [.kb/snapshots.md](.kb/snapshots.md) - Payload dumps onto disk: the snapshot calls, the filename grammar, the tee points.
 - [.kb/tls.md](.kb/tls.md) - The tls settings: the named cert pairs, the four meanings, the pins, flags, generation.
