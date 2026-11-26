@@ -898,8 +898,8 @@ func TestRunAddSecretPipeEOF(t *testing.T) {
 		Stdout: &stdout,
 		Stderr: &stdout,
 	})
-	if err == nil || !strings.Contains(err.Error(), "cannot read the password") {
-		t.Fatalf("error = %v, want the password ask named", err)
+	if err == nil || !strings.Contains(err.Error(), "cannot read the secrets password") {
+		t.Fatalf("error = %v, want the secrets password ask named", err)
 	}
 	err = Run(context.Background(), RunOptions{
 		Argv:   []string{"--add-secret", "api"},

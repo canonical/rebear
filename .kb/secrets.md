@@ -51,7 +51,11 @@ terminal, plainly on a pipe
 with no prompts - and the file lands 0600 in the 0700
 directory, with a confirmation on stdout naming the file's
 real path - the user's home shortened to `~` when the file
-sits under it. Overwriting an existing name is the rotation
+sits under it. On a terminal, every typed value is asked
+twice, the second ask spelled `again: ` - and a differing
+pair is no failure, for the wrong one cannot be named: the
+pair is asked again until two reads agree. A pipe reads the
+two lines alone. Overwriting an existing name is the rotation
 path, not an error. The salt is picked in this order: the
 `--salt <base64>` flag's own value, decoded to exactly 24 bytes
 and with the directory unread; the directory's first secret's
@@ -64,8 +68,12 @@ verifies it opens the secrets the salt came from, refusing
 otherwise as `wrong password: ...` - a differing one would
 mint a directory no single password serves. The verification
 is also the confirmation: the password is asked once only.
+A wrong one is asked once more on a terminal; the second
+failure ends the add.
 The flag's salt joins no group, so it verifies nothing - the
-second ask is what a terminal falls back to.
+second ask is what a terminal falls back to. The typed
+secret keeps its own `again:` on a terminal, always: the
+keyring skips the password's asks, never the secret's.
 
 ## The keyring
 
@@ -81,16 +89,19 @@ takes - so each home keeps its own password:
 The flag is a choice of the run, never saved. Under it stdin
 is never touched for the password - a lookup that comes back
 empty, or fails, is a hard error naming the home - and the
-same verification rules hold: a keyring password that opens
-nothing of the borrowed-from secrets is refused, and a fresh
-seal takes the entry whole, with no second ask.
+same verification rules hold, without the retry: a keyring
+password that opens nothing of the borrowed-from secrets is
+refused at once, and a fresh seal takes the entry whole, with
+no second ask.
 
 `--set-keyring` writes the entry, one-shot: the password is
 asked for on stdin and checked first - the seals on disk
 open with it, one ask, and with no seals a typed password is
-asked twice - and a password that opens nothing is refused as
-`wrong password: ...`. An empty password is refused too:
-a later lookup cannot tell an empty entry from a missing one.
+asked again until the two agree - and a password that opens
+nothing is refused as `wrong password: ...`. The confirmed
+password is the stored one, and an empty one is refused
+after the check: a later lookup cannot tell an empty entry
+from a missing one.
 The store carries the same attributes, so it updates the
 entry in place - rotating is one `--set-keyring` again - and
 the restart re-reads it. The two flags exclude each other and
@@ -111,8 +122,10 @@ re-opens with it in hand - a file added, dropped, or resealed
 rides the reload - and a sealed-open failure is a build
 failure: `SIGHUP - cannot reload configuration` logs it and
 the old generation keeps serving. A file resealed under a
-different password fails the reload the same way. Rebear
-never re-prompts after the first ask; the operator restarts.
+different password fails the reload the same way. The first
+ask tolerates one slip: a password that opens nothing is
+asked once more, and the second failure ends the run.
+Rebear never re-prompts after that; the operator restarts.
 
 ## The dict
 

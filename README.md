@@ -133,9 +133,10 @@ service token lives in an encrypted secret file:
 
 ```bash
 $ rebear --add-secret remote
-password: ***
-again: ***
-secret: ***
+secrets password:
+again:
+secret:
+again:
 secrets: wrote ~/.config/rebear/secrets/remote.json
 ```
 
@@ -619,9 +620,10 @@ For that, start by creating a new secret:
 
 ```bash
 $ rebear --add-secret remote
-password:
+secrets password:
 again:
 secret:
+again:
 secrets: wrote ~/.config/rebear/secrets/remote.json
 ```
 

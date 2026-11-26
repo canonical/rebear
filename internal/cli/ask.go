@@ -26,6 +26,8 @@ import (
 	"syscall"
 
 	"golang.org/x/term"
+
+	"github.com/canonical/rebear/internal/secrets"
 )
 
 // An asker reads the sensitive lines of one run: passwords
@@ -117,35 +119,100 @@ func (a *asker) readLine(prompt string) (string, error) {
 	}
 }
 
+// readValue reads one sensitive line named by the noun: the
+// prompt and the failed read spell the noun.
+func (a *asker) readValue(noun string) (string, error) {
+	value, err := a.readLine(noun + ": ")
+	if err != nil {
+		return "", fmt.Errorf("cannot read the %s: %v", noun, err)
+	}
+	return value, nil
+}
+
+// readAgain asks the value again on a terminal until the two
+// reads agree, and answers the agreed value; a pipe accepts
+// the value as read. A differing pair hides the wrong side,
+// so both are read again, the notice spelling the plural and
+// the failed ask the noun.
+func (a *asker) readAgain(noun, plural, value string) (string, error) {
+	if a.tty == nil {
+		return value, nil
+	}
+	for {
+		confirm, err := a.readLine("again: ")
+		if err != nil {
+			return "", fmt.Errorf("cannot read the %s again: %v", noun, err)
+		}
+		if confirm == value {
+			return value, nil
+		}
+		fmt.Fprintf(a.stderr, "error: the two %s differ\n", plural)
+		if value, err = a.readValue(noun); err != nil {
+			return "", err
+		}
+	}
+}
+
 // readPassword reads one password: the keyring entry when
-// --keyring chose it, else one line from stdin. The name
-// spells the stdin prompt and the error of a failed read.
-func (a *asker) readPassword(name string) (string, error) {
+// --keyring chose it, else one typed line. Every ask prints
+// the one prompt, the secrets password's.
+func (a *asker) readPassword() (string, error) {
 	if a.keyringHome != "" {
 		return a.readKeyringPassword()
 	}
-	password, err := a.readLine(name + ": ")
+	return a.readValue("secrets password")
+}
+
+// readSecret reads the secret and asks it again on a
+// terminal, always: the keyring holds passwords only, so the
+// secret is typed and confirmed under --keyring too.
+func (a *asker) readSecret() (string, error) {
+	secret, err := a.readValue("secret")
 	if err != nil {
-		return "", fmt.Errorf("cannot read the %s: %v", name, err)
+		return "", err
+	}
+	return a.readAgain("secret", "secrets", secret)
+}
+
+// verifyPassword makes sure the password opens the sealed
+// secrets, reading it once more when they refuse - a wrong
+// one is usually a slip of the fingers - and answers the
+// password of the last try. The open failure is answered as
+// `wrong password: ...`, the one spelling of the refusal,
+// and a failed read as its own. A keyring entry and a
+// pipe never read again: the entry is one lookup, and a
+// pipe has one line per ask.
+func (a *asker) verifyPassword(password string, sealed []secrets.Secret) (string, error) {
+	if _, err := secrets.Open(sealed, password); err != nil {
+		if a.tty == nil || a.keyringHome != "" {
+			return "", fmt.Errorf("wrong password: %v", err)
+		}
+		fmt.Fprintf(a.stderr, "error: wrong password: %v\n", err)
+		if password, err = a.readValue("secrets password"); err != nil {
+			return "", err
+		}
+		if _, err = secrets.Open(sealed, password); err != nil {
+			return "", fmt.Errorf("wrong password: %v", err)
+		}
 	}
 	return password, nil
 }
 
-// confirmTyped confirms a password that nothing else can: a
-// terminal asks the user to type it again. A pipe and the
-// keyring cannot confirm, and accept the password.
-func (a *asker) confirmTyped(password string) error {
-	if a.keyringHome != "" || a.tty == nil {
-		return nil
+// checkPassword confirms the password and answers the one to
+// keep: opening the sealed secrets is the confirmation, and
+// a typed one that fails it is read again once, with the
+// refusal spelled by verifyPassword. Without seals, the
+// again ask settles the typed password - the agreed value
+// wins, for nothing on disk can check it - and a keyring
+// entry is taken as is.
+func (a *asker) checkPassword(password string, sealed []secrets.Secret) (string, error) {
+	if len(sealed) == 0 {
+		if a.keyringHome == "" {
+			return a.readAgain("secrets password", "passwords", password)
+		}
+		return password, nil
 	}
-	confirm, err := a.readLine("again: ")
-	if err != nil {
-		return fmt.Errorf("cannot read the password again: %v", err)
-	}
-	if confirm != password {
-		return fmt.Errorf("the two passwords differ")
-	}
-	return nil
+	return a.verifyPassword(password, sealed)
 }
 
 // readKeyringPassword reads the password of the keyring entry

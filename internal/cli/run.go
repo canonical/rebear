@@ -181,7 +181,11 @@ func Run(ctx context.Context, opts RunOptions) error {
 		} else if len(sealed) > 0 {
 			if !asked {
 				ask := newRunAsker(opts, parsed.Keyring, baseDir)
-				password, err = ask.readPassword("secrets password")
+				password, err = ask.readPassword()
+				if err != nil {
+					return err
+				}
+				password, err = ask.verifyPassword(password, sealed)
 				if err != nil {
 					return err
 				}
@@ -265,8 +269,8 @@ func newRunAsker(opts RunOptions, keyring bool, home string) *asker {
 }
 
 // sealSecret is the --add-secret one-shot: the name is checked,
-// the salt is picked, the password and the secret are read, and
-// the file is written and confirmed. Overwriting an existing
+// the salt is picked, the password and the secret are read and
+// confirmed, and the file is written. Overwriting an existing
 // name is the rotation path, not an error.
 func sealSecret(opts RunOptions, parsed *Options, baseDir string) error {
 	if err := setup.CheckName(parsed.AddSecret); err != nil {
@@ -278,27 +282,17 @@ func sealSecret(opts RunOptions, parsed *Options, baseDir string) error {
 		return err
 	}
 	ask := newRunAsker(opts, parsed.Keyring, baseDir)
-	password, err := ask.readPassword("password")
+	password, err := ask.readPassword()
 	if err != nil {
 		return err
 	}
-	if len(borrowed) > 0 {
-		// The borrowed salt shares the directory's derivation,
-		// so the password must open the secrets it came from -
-		// and opening them replaces the second ask.
-		if _, err := secrets.Open(borrowed, password); err != nil {
-			return fmt.Errorf("wrong password: %v", err)
-		}
-	} else {
-		// Nothing on disk can check this password - the first
-		// seal of a new directory, or a --salt one.
-		if err := ask.confirmTyped(password); err != nil {
-			return err
-		}
-	}
-	secret, err := ask.readLine("secret: ")
+	password, err = ask.checkPassword(password, borrowed)
 	if err != nil {
-		return fmt.Errorf("cannot read the secret: %v", err)
+		return err
+	}
+	secret, err := ask.readSecret()
+	if err != nil {
+		return err
 	}
 	body, err := secrets.Encrypt(secret, password, salt)
 	if err != nil {
@@ -315,38 +309,33 @@ func sealSecret(opts RunOptions, parsed *Options, baseDir string) error {
 	return nil
 }
 
-// setKeyring is the --set-keyring one-shot: the password is
-// asked for on stdin and stored in the keyring entry the home
+// setKeyring is the --set-keyring one-shot: the password
+// is asked for on stdin and stored in the keyring entry the home
 // names. The seals on disk check it first - one ask, the check
 // in place of a second - and a password that opens nothing is
-// refused; with no seals, a typed password is asked twice. An
-// empty password is refused too: a later lookup cannot tell
-// an empty entry from a missing one.
+// refused; with no seals, a typed password is asked again
+// until the two agree. The confirmed password is the stored
+// one, and an empty one is refused: a later lookup cannot
+// tell an empty entry from a missing one.
 func setKeyring(opts RunOptions, home string) error {
 	dir := filepath.Join(home, "secrets")
 	sealed, err := secrets.Scan(dir)
 	if err != nil {
 		return err
 	}
-	ask := newAsker(opts.Stdin, opts.Stderr, "")
-	password, err := ask.readPassword("password")
+	ask := newRunAsker(opts, false, home)
+	password, err := ask.readPassword()
+	if err != nil {
+		return err
+	}
+	// Whatever opens the seals on disk can start rebear, so
+	// the stored entry must agree with every file.
+	password, err = ask.checkPassword(password, sealed)
 	if err != nil {
 		return err
 	}
 	if password == "" {
 		return fmt.Errorf("--set-keyring: cannot store an empty password")
-	}
-	if len(sealed) > 0 {
-		// Whatever opens the seals on disk can start rebear, so
-		// the stored entry agrees with every file.
-		if _, err := secrets.Open(sealed, password); err != nil {
-			return fmt.Errorf("wrong password: %v", err)
-		}
-	} else {
-		// Nothing on disk can check the password, so the fingers do.
-		if err := ask.confirmTyped(password); err != nil {
-			return err
-		}
 	}
 	if err := storeKeyringPassword(home, password); err != nil {
 		return err
